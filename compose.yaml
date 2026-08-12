@@ -1,0 +1,101 @@
+services:
+  teslamate_mcp:
+    build: .
+    image: local/teslamate-mcp:0.3.0
+    container_name: teslamate_mcp
+    restart: unless-stopped
+    environment:
+      TESLAMATE_DB_HOST: database
+      TESLAMATE_DB_PORT: "5432"
+      TESLAMATE_DB_NAME: teslamate
+      TESLAMATE_DB_USER: teslamate_mcp
+      TESLAMATE_DB_PASSWORD_FILE: /run/secrets/db_password
+      TESLAMATE_MQTT_HOST: mosquitto
+      TESLAMATE_MQTT_PORT: "1883"
+      TESLAMATE_WEB_URL: http://teslamate:4000/
+      TESLAMATE_TIMEZONE: Asia/Shanghai
+      TESLAMATE_MCP_HOST: 0.0.0.0
+      TESLAMATE_MCP_PORT: "8766"
+      TESLAMATE_MCP_TOKEN_FILE: /run/secrets/mcp_token
+      TESLAMATE_MCP_ALLOWED_HOSTS: 127.0.0.1:*,localhost:*,100.84.50.63:*,main-oci.tail7affc2.ts.net:*
+    ports:
+      - "100.84.50.63:8766:8766"
+    secrets:
+      - db_password
+      - mcp_token
+    networks:
+      - teslamate
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  teslamate_cost_mcp:
+    build: .
+    image: local/teslamate-mcp:0.3.0
+    container_name: teslamate_cost_mcp
+    entrypoint: ["teslamate-cost-mcp"]
+    restart: unless-stopped
+    environment:
+      TESLAMATE_DB_HOST: database
+      TESLAMATE_DB_PORT: "5432"
+      TESLAMATE_DB_NAME: teslamate
+      TESLAMATE_DB_USER: teslamate_cost_mcp
+      TESLAMATE_COST_DB_PASSWORD_FILE: /run/secrets/cost_db_password
+      TESLAMATE_TIMEZONE: Asia/Shanghai
+      TESLAMATE_COST_HOST: 0.0.0.0
+      TESLAMATE_COST_PORT: "8767"
+      TESLAMATE_COST_TOKEN_HUUNTER_FILE: /run/secrets/cost_token_huunter
+      TESLAMATE_COST_TOKEN_GUOGUO_FILE: /run/secrets/cost_token_guoguo
+      TESLAMATE_COST_SIGNING_SECRET_FILE: /run/secrets/cost_signing_secret
+      TESLAMATE_COST_ALLOWED_HOSTS: 127.0.0.1:*,localhost:*,100.84.50.63:*,main-oci.tail7affc2.ts.net:*
+    ports:
+      - "100.84.50.63:8767:8767"
+    secrets:
+      - cost_db_password
+      - cost_token_huunter
+      - cost_token_guoguo
+      - cost_signing_secret
+    networks:
+      - teslamate
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8767/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+secrets:
+  db_password:
+    file: ./secrets/db_password
+  mcp_token:
+    file: ./secrets/mcp_token
+  cost_db_password:
+    file: ./secrets/cost_db_password
+  cost_token_huunter:
+    file: ./secrets/cost_token_huunter
+  cost_token_guoguo:
+    file: ./secrets/cost_token_guoguo
+  cost_signing_secret:
+    file: ./secrets/cost_signing_secret
+
+networks:
+  teslamate:
+    external: true
+    name: oci-staging_default

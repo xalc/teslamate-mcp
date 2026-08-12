@@ -1,0 +1,15 @@
+.venv/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+
+# Runtime credentials. Never commit these files.
+secrets/
+.env
+.env.*
+!.env.example
+
+# Host-specific rollback material and generated exports.
+backups/
+exports/
+

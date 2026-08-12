@@ -1,0 +1,28 @@
+[project]
+name = "teslamate-mcp"
+version = "0.3.0"
+description = "TeslaMate read-only and charging-cost MCP services"
+requires-python = ">=3.12"
+dependencies = [
+  "mcp[cli]>=1.27,<2",
+  "paho-mqtt>=2.1,<3",
+  "psycopg[binary]>=3.2,<4",
+  "uvicorn>=0.30,<1",
+]
+
+[project.scripts]
+teslamate-mcp = "teslamate_mcp.server:main"
+teslamate-cost-mcp = "teslamate_mcp.cost_server:main"
+
+[project.optional-dependencies]
+test = ["pytest>=8,<9"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/teslamate_mcp"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

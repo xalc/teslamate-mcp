@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+token_file=/opt/application/teslamate-mcp/secrets/mcp_token
+if [ ! -r "$token_file" ]; then
+    echo "TeslaMate MCP client token is not readable: $token_file" >&2
+    exit 1
+fi
+
+IFS= read -r TESLAMATE_MCP_TOKEN < "$token_file"
+export TESLAMATE_MCP_TOKEN
+exec "$@"
