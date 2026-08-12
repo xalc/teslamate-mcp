@@ -1,5 +1,7 @@
 # TeslaMate MCP
 
+[简体中文](README.zh-CN.md) · [AI deployment prompt](AI_SETUP_PROMPT.zh-CN.md)
+
 Two authenticated MCP services for an existing [TeslaMate](https://github.com/teslamate-org/teslamate) deployment:
 
 - a read-only vehicle, drive, route, charging, battery and lifetime-statistics service;
@@ -90,4 +92,3 @@ git grep -nE '(BEGIN (RSA|OPENSSH) PRIVATE KEY|Bearer [A-Za-z0-9._-]{20,})'
 - Bind the service ports to localhost, a private interface or a trusted overlay network.
 - Route and charging tools may return exact coordinates; treat access as sensitive.
 - Original billing screenshots are not stored. Only the supplied source summary is written to the cost audit row.
-
