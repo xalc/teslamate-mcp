@@ -8,12 +8,13 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -27,7 +28,6 @@ from psycopg.rows import dict_row
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("teslamate_cost_mcp")
@@ -51,6 +51,21 @@ class ChargingCostChange(TypedDict):
     session_id: int
     operation: NotRequired[Literal["set", "clear"]]
     amount_cny: NotRequired[str | None]
+    source_kind: NotRequired[Literal["text", "screenshot"]]
+    source_summary: NotRequired[str]
+
+
+class TollExpenseChange(TypedDict):
+    operation: NotRequired[Literal["upsert", "void"]]
+    expense_id: NotRequired[str]
+    expected_revision: NotRequired[int]
+    amount_cny: NotRequired[str]
+    occurred_at: NotRequired[str]
+    entry_name: NotRequired[str]
+    exit_name: NotRequired[str]
+    provider: NotRequired[Literal["manual", "etc", "wechat", "alipay", "other"]]
+    external_ref: NotRequired[str]
+    drive_ids: NotRequired[list[int]]
     source_kind: NotRequired[Literal["text", "screenshot"]]
     source_summary: NotRequired[str]
 
@@ -539,6 +554,508 @@ def _request_changes(
     return {**committed, "proposals": proposals}
 
 
+def _parse_uuid(value: Any, field_name: str) -> str:
+    try:
+        return str(uuid.UUID(str(value)))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise TeslaMateCostError(f"invalid {field_name}") from exc
+
+
+def _parse_toll_time(value: str) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise TeslaMateCostError("occurred_at is required")
+    normalized = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise TeslaMateCostError(f"invalid ISO 8601 occurred_at: {value}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=LOCAL_TZ)
+    return parsed.astimezone(UTC).replace(tzinfo=None)
+
+
+def _sanitize_toll_text(value: Any, *, limit: int = 120) -> str:
+    cleaned = _sanitize_summary(str(value or ""))
+    return cleaned[:limit]
+
+
+def _normalize_drive_ids(value: Any) -> list[int]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > 20:
+        raise TeslaMateCostError("drive_ids must contain between 0 and 20 items")
+    normalized: list[int] = []
+    for item in value:
+        if isinstance(item, bool):
+            raise TeslaMateCostError("drive_ids must contain integers")
+        try:
+            drive_id = int(item)
+        except (TypeError, ValueError) as exc:
+            raise TeslaMateCostError("drive_ids must contain integers") from exc
+        if drive_id <= 0:
+            raise TeslaMateCostError("drive_ids must contain positive integers")
+        normalized.append(drive_id)
+    if len(set(normalized)) != len(normalized):
+        raise TeslaMateCostError("drive_ids must not contain duplicates")
+    return normalized
+
+
+def _haversine_km(
+    lat1: Any, lon1: Any, lat2: Any, lon2: Any
+) -> float | None:
+    if None in {lat1, lon1, lat2, lon2}:
+        return None
+    try:
+        first_lat, first_lon, second_lat, second_lon = map(
+            math.radians, (float(lat1), float(lon1), float(lat2), float(lon2))
+        )
+    except (TypeError, ValueError):
+        return None
+    delta_lat = second_lat - first_lat
+    delta_lon = second_lon - first_lon
+    value = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(first_lat)
+        * math.cos(second_lat)
+        * math.sin(delta_lon / 2) ** 2
+    )
+    return 6371.0088 * 2 * math.atan2(math.sqrt(value), math.sqrt(1 - value))
+
+
+def _drives_are_continuous(previous: dict[str, Any], current: dict[str, Any]) -> bool:
+    gap = (current["start_date"] - previous["end_date"]).total_seconds()
+    if gap < 0 or gap > 120 * 60:
+        return False
+    spatial_gap = _haversine_km(
+        previous.get("end_latitude"),
+        previous.get("end_longitude"),
+        current.get("start_latitude"),
+        current.get("start_longitude"),
+    )
+    if spatial_gap is not None:
+        return spatial_gap <= 10.0
+    previous_place = _normalize_location(previous.get("end_address") or "")
+    current_place = _normalize_location(current.get("start_address") or "")
+    return gap <= 15 * 60 or bool(
+        previous_place
+        and current_place
+        and (previous_place in current_place or current_place in previous_place)
+    )
+
+
+def _journey_score(
+    drives: list[dict[str, Any]],
+    *,
+    start: datetime,
+    end: datetime,
+    entry_hint: str,
+    exit_hint: str,
+) -> tuple[float, float | None, float | None, float]:
+    entry = _normalize_location(entry_hint)
+    exit_name = _normalize_location(exit_hint)
+    start_place = _normalize_location(drives[0].get("start_address") or "")
+    end_place = _normalize_location(drives[-1].get("end_address") or "")
+    has_cjk = lambda value: bool(re.search(r"[\u4e00-\u9fff]", value))
+    entry_comparable = bool(entry and start_place) and has_cjk(entry) == has_cjk(start_place)
+    exit_comparable = bool(exit_name and end_place) and has_cjk(exit_name) == has_cjk(end_place)
+    entry_score = (
+        SequenceMatcher(None, entry, start_place).ratio()
+        if entry_comparable
+        else None
+    )
+    exit_score = (
+        SequenceMatcher(None, exit_name, end_place).ratio()
+        if exit_comparable
+        else None
+    )
+    if entry and start_place and (entry in start_place or start_place in entry):
+        entry_score = 1.0
+    if exit_name and end_place and (
+        exit_name in end_place or end_place in exit_name
+    ):
+        exit_score = 1.0
+    scale = max((end - start).total_seconds(), 3600.0)
+    edge_delta = abs((drives[0]["start_date"] - start).total_seconds()) + abs(
+        (end - drives[-1]["end_date"]).total_seconds()
+    )
+    time_score = max(0.0, 1.0 - edge_delta / (2 * scale))
+    components: list[tuple[float, float]] = [(time_score, 0.2)]
+    if entry_score is not None:
+        components.append((entry_score, 0.4))
+    if exit_score is not None:
+        components.append((exit_score, 0.4))
+    total_weight = sum(weight for _, weight in components)
+    score = sum(value * weight for value, weight in components) / total_weight
+    return round(score, 3), entry_score, exit_score, round(time_score, 3)
+
+
+def _find_toll_journey_candidates(
+    *,
+    from_time: str,
+    to_time: str,
+    entry_hint: str | None,
+    exit_hint: str | None,
+    amount_cny: str | None,
+    provider: str | None,
+    external_ref: str | None,
+    limit: int,
+) -> dict[str, Any]:
+    start = _parse_time(from_time)
+    end = _parse_time(to_time)
+    if start >= end:
+        raise TeslaMateCostError("from_time must be earlier than to_time")
+    # Tool callers are LLM-driven and may occasionally request more choices than
+    # the compact approval flow supports. Keep the read path resilient instead
+    # of failing the whole expense capture.
+    limit = max(1, min(limit, 3))
+    rows = _query(
+        """
+        SELECT * FROM teslamate_cost_mcp.toll_candidate_drives
+        WHERE start_date >= %s AND start_date < %s
+        ORDER BY start_date, id
+        LIMIT 50
+        """,
+        (start - timedelta(hours=6), end + timedelta(hours=6)),
+    )
+    sequences: list[dict[str, Any]] = []
+    entry = entry_hint or ""
+    exit_name = exit_hint or ""
+    for first in range(len(rows)):
+        current: list[dict[str, Any]] = []
+        distance = Decimal("0")
+        for index in range(first, min(len(rows), first + 20)):
+            row = rows[index]
+            if row.get("end_date") is None:
+                break
+            if current and not _drives_are_continuous(current[-1], row):
+                break
+            current.append(row)
+            distance += Decimal(str(row.get("distance") or 0))
+            if distance < Decimal("5"):
+                continue
+            score, entry_score, exit_score, time_score = _journey_score(
+                current,
+                start=start,
+                end=end,
+                entry_hint=entry,
+                exit_hint=exit_name,
+            )
+            sequences.append(
+                {
+                    "drive_ids": [int(item["id"]) for item in current],
+                    "start_at": _to_local(current[0]["start_date"]),
+                    "end_at": _to_local(current[-1]["end_date"]),
+                    "from": current[0].get("start_address"),
+                    "to": current[-1].get("end_address"),
+                    "distance_km": format(distance.quantize(Decimal("0.1")), "f"),
+                    "drive_count": len(current),
+                    "score": score,
+                    "match": {
+                        "entry_similarity": (
+                            round(entry_score, 3) if entry_score is not None else None
+                        ),
+                        "exit_similarity": (
+                            round(exit_score, 3) if exit_score is not None else None
+                        ),
+                        "time_score": time_score,
+                    },
+                }
+            )
+    sequences.sort(
+        key=lambda item: (
+            item["score"],
+            Decimal(item["distance_km"]),
+            item["drive_count"],
+        ),
+        reverse=True,
+    )
+    candidates: list[dict[str, Any]] = []
+    for sequence in sequences:
+        sequence_ids = set(sequence["drive_ids"])
+        sequence_distance = Decimal(sequence["distance_km"])
+        near_equivalent = False
+        for selected in candidates:
+            selected_ids = set(selected["drive_ids"])
+            nested = sequence_ids <= selected_ids or selected_ids <= sequence_ids
+            distance_delta = abs(
+                sequence_distance - Decimal(selected["distance_km"])
+            )
+            if nested and distance_delta < Decimal("5.0"):
+                near_equivalent = True
+                break
+        if not near_equivalent:
+            candidates.append(sequence)
+        if len(candidates) >= limit:
+            break
+    top_score = candidates[0]["score"] if candidates else 0.0
+    next_score = candidates[1]["score"] if len(candidates) > 1 else 0.0
+    high_confidence = bool(
+        candidates and top_score >= 0.80 and top_score - next_score >= 0.15
+    )
+    duplicate_candidates: list[dict[str, Any]] = []
+    if amount_cny is not None:
+        amount = _parse_amount(amount_cny)
+        normalized_provider = str(provider or "").strip().lower() or None
+        if normalized_provider not in {None, "manual", "etc", "wechat", "alipay", "other"}:
+            raise TeslaMateCostError("invalid toll provider")
+        normalized_ref = _sanitize_toll_text(external_ref)
+        duplicate_candidates = _query(
+            """
+            SELECT expense_id, amount, occurred_at, entry_name, exit_name,
+                   provider, external_ref, status, journey_id
+            FROM teslamate_cost_mcp.toll_expense_current
+            WHERE status <> 'void' AND amount = %s
+              AND occurred_at >= %s AND occurred_at <= %s
+              AND (CAST(%s AS text) IS NULL OR provider = %s)
+              AND (CAST(%s AS text) = '' OR external_ref = %s)
+            ORDER BY occurred_at DESC
+            LIMIT 5
+            """,
+            (
+                amount,
+                start - timedelta(days=1),
+                end + timedelta(days=1),
+                normalized_provider,
+                normalized_provider,
+                normalized_ref,
+                normalized_ref,
+            ),
+        )
+    return {
+        "actor": _actor(),
+        "timezone": str(LOCAL_TZ),
+        "candidates": candidates,
+        "count": len(candidates),
+        "high_confidence": high_confidence,
+        "requires_user_selection": bool(candidates) and not high_confidence,
+        "unmatched_allowed": True,
+        "duplicate_warning": bool(duplicate_candidates),
+        "duplicate_candidates": _json_value(duplicate_candidates),
+        "write_performed": False,
+    }
+
+
+def _toll_fingerprint(
+    *,
+    amount: Decimal,
+    occurred_at: datetime,
+    entry_name: str,
+    exit_name: str,
+    provider: str,
+    external_ref: str,
+) -> str:
+    normalized = "|".join(
+        (
+            format(amount, ".2f"),
+            occurred_at.isoformat(timespec="minutes"),
+            _normalize_location(entry_name),
+            _normalize_location(exit_name),
+            provider,
+            external_ref.strip().lower(),
+        )
+    )
+    return hashlib.sha256(normalized.encode()).hexdigest()
+
+
+def _request_toll_changes(
+    *, actor: str, changes: list[TollExpenseChange]
+) -> dict[str, Any]:
+    if not 1 <= len(changes) <= 20:
+        raise TeslaMateCostError("changes must contain between 1 and 20 items")
+    prepared: list[dict[str, Any]] = []
+    for change in changes:
+        if not isinstance(change, dict):
+            raise TeslaMateCostError("each change must be an object")
+        operation = str(change.get("operation", "upsert"))
+        if operation not in {"upsert", "void"}:
+            raise TeslaMateCostError("operation must be upsert or void")
+        expense_id = (
+            _parse_uuid(change["expense_id"], "expense_id")
+            if change.get("expense_id")
+            else str(uuid.uuid4())
+        )
+        expected_revision = change.get("expected_revision")
+        if change.get("expense_id") and not isinstance(expected_revision, int):
+            raise TeslaMateCostError(
+                "expected_revision is required when changing an existing expense"
+            )
+        if not change.get("expense_id") and operation == "void":
+            raise TeslaMateCostError("expense_id is required for void")
+        drive_ids = _normalize_drive_ids(change.get("drive_ids"))
+        request_id = str(uuid.uuid4())
+        if operation == "void":
+            prepared.append(
+                {
+                    "request_id": request_id,
+                    "operation": operation,
+                    "expense_id": expense_id,
+                    "expected_revision": expected_revision,
+                    "amount": None,
+                    "occurred_at": None,
+                    "entry_name": "",
+                    "exit_name": "",
+                    "provider": "manual",
+                    "external_ref": "",
+                    "fingerprint": "",
+                    "source_kind": "text",
+                    "source_summary": "",
+                    "journey_id": None,
+                    "drive_ids": [],
+                }
+            )
+            continue
+        amount = _parse_amount(change.get("amount_cny", ""))
+        occurred_at = _parse_toll_time(change.get("occurred_at", ""))
+        provider = str(change.get("provider", "manual")).strip().lower()
+        if provider not in {"manual", "etc", "wechat", "alipay", "other"}:
+            raise TeslaMateCostError("invalid toll provider")
+        source_kind = str(change.get("source_kind", "text"))
+        if source_kind not in {"text", "screenshot"}:
+            raise TeslaMateCostError("source_kind must be text or screenshot")
+        entry_name = _sanitize_toll_text(change.get("entry_name"))
+        exit_name = _sanitize_toll_text(change.get("exit_name"))
+        external_ref = _sanitize_toll_text(change.get("external_ref"))
+        journey_id = (
+            str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    "teslamate:toll-journey:" + ",".join(map(str, drive_ids)),
+                )
+            )
+            if drive_ids
+            else None
+        )
+        prepared.append(
+            {
+                "request_id": request_id,
+                "operation": operation,
+                "expense_id": expense_id,
+                "expected_revision": expected_revision,
+                "amount": amount,
+                "occurred_at": occurred_at,
+                "entry_name": entry_name,
+                "exit_name": exit_name,
+                "provider": provider,
+                "external_ref": external_ref,
+                "fingerprint": _toll_fingerprint(
+                    amount=amount,
+                    occurred_at=occurred_at,
+                    entry_name=entry_name,
+                    exit_name=exit_name,
+                    provider=provider,
+                    external_ref=external_ref,
+                ),
+                "source_kind": source_kind,
+                "source_summary": _sanitize_summary(change.get("source_summary", "")),
+                "journey_id": journey_id,
+                "drive_ids": drive_ids,
+            }
+        )
+
+    saved: list[dict[str, Any]] = []
+    try:
+        with _connect() as con, con.cursor() as cur:
+            for item in prepared:
+                cur.execute(
+                    """
+                    SELECT * FROM teslamate_cost_mcp.apply_toll_expense_change(
+                        %s::uuid, %s, %s, %s::uuid, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s::uuid, %s::integer[]
+                    )
+                    """,
+                    (
+                        item["request_id"], actor, item["operation"],
+                        item["expense_id"], item["expected_revision"],
+                        item["amount"], item["occurred_at"], item["entry_name"],
+                        item["exit_name"], item["provider"], item["external_ref"],
+                        item["fingerprint"], item["source_kind"],
+                        item["source_summary"], item["journey_id"], item["drive_ids"],
+                    ),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise TeslaMateCostError("toll expense update returned no result")
+                saved.append(row)
+    except psycopg.Error as exc:
+        message = getattr(exc.diag, "message_primary", None) or str(exc)
+        raise TeslaMateCostError(message) from exc
+    return {
+        "saved": _json_value(saved),
+        "count": len(saved),
+        "actor": actor,
+        "currency": "CNY",
+        "write_performed": True,
+    }
+
+
+def _toll_history(
+    *, expense_id: str | None, status: str | None, limit: int
+) -> dict[str, Any]:
+    if limit < 1 or limit > 50:
+        raise TeslaMateCostError("limit must be between 1 and 50")
+    normalized_id = _parse_uuid(expense_id, "expense_id") if expense_id else None
+    if status not in {None, "matched", "pending_match", "void"}:
+        raise TeslaMateCostError("invalid toll expense status")
+    current = _query(
+        """
+        SELECT * FROM teslamate_cost_mcp.toll_expense_current
+        WHERE (%s::uuid IS NULL OR expense_id = %s::uuid)
+          AND (%s IS NULL OR status = %s)
+        ORDER BY occurred_at DESC, expense_id DESC
+        LIMIT %s
+        """,
+        (normalized_id, normalized_id, status, status, limit),
+    )
+    audit = _query(
+        """
+        SELECT * FROM teslamate_cost_mcp.toll_expense_history
+        WHERE (%s::uuid IS NULL OR expense_id = %s::uuid)
+        ORDER BY created_at DESC, audit_id DESC
+        LIMIT %s
+        """,
+        (normalized_id, normalized_id, limit),
+    )
+    return {
+        "expenses": _json_value(current),
+        "audit": _json_value(audit),
+        "count": len(current),
+        "currency": "CNY",
+    }
+
+
+def _road_trip_cost_summary(journey_id: str) -> dict[str, Any]:
+    normalized_id = _parse_uuid(journey_id, "journey_id")
+    journey = _one(
+        "SELECT * FROM teslamate_cost_mcp.road_journey_summary WHERE journey_id = %s::uuid",
+        (normalized_id,),
+    )
+    if not journey:
+        raise TeslaMateCostError(f"unknown journey_id: {normalized_id}")
+    charges = _one(
+        """
+        SELECT count(*) AS session_count,
+               count(*) FILTER (WHERE cost IS NULL) AS missing_cost_count,
+               sum(cost) FILTER (WHERE cost IS NOT NULL) AS charging_total
+        FROM teslamate_cost_mcp.charging_sessions
+        WHERE car_id = %s AND start_date >= %s AND start_date <= %s
+        """,
+        (journey["car_id"], journey["start_date"], journey["end_date"]),
+    ) or {}
+    toll_total = Decimal(journey.get("toll_total") or 0)
+    charging_total = Decimal(charges.get("charging_total") or 0)
+    missing_count = int(charges.get("missing_cost_count") or 0)
+    return {
+        "journey": _json_value(journey),
+        "toll_total_cny": format(toll_total, ".2f"),
+        "charging_total_cny": format(charging_total, ".2f"),
+        "known_total_cny": format(toll_total + charging_total, ".2f"),
+        "charging_session_count": int(charges.get("session_count") or 0),
+        "missing_charging_cost_count": missing_count,
+        "complete": missing_count == 0,
+        "currency": "CNY",
+    }
+
+
 def _history(*, session_id: int | None, limit: int) -> dict[str, Any]:
     if limit < 1 or limit > 50:
         raise TeslaMateCostError("limit must be between 1 and 50")
@@ -555,9 +1072,9 @@ def _history(*, session_id: int | None, limit: int) -> dict[str, Any]:
 
 
 mcp = FastMCP(
-    "TeslaMate Charging Cost Writer",
+    "TeslaMate Expense Writer",
     instructions=(
-        "Record TeslaMate charging costs in CNY for authorized Feishu users. First extract the final "
+        "Record TeslaMate charging and highway toll costs in CNY for authorized Feishu users. For charging, extract the final "
         "amount actually paid and a time hint from text or an attached screenshot. Resolve fuzzy times "
         "in Asia/Shanghai, call find_charging_sessions_for_cost, and show at most three candidates. Never "
         "guess when multiple candidates exist. Once every order has exactly one match, call "
@@ -567,7 +1084,11 @@ mcp = FastMCP(
         "request. The approval card is the only confirmation. A screenshot alone "
         "does not bypass the host approval card. "
         "Treat the bill's final paid total as the cost, including service, parking and occupancy fees after "
-        "discounts. Do not convert foreign currency or accept negative amounts."
+        "discounts. For a highway toll, extract amount, passage time, entrance, exit, provider and external reference when shown, "
+        "then call find_toll_journey_candidates. Use the sole high-confidence candidate automatically; when candidates are ambiguous, "
+        "ask the user to select one before writing. If no candidate exists, an unmatched pending expense is allowed. Call "
+        "request_toll_expense_changes immediately after matching; its host approval card is the only confirmation. Never store the "
+        "original screenshot. Do not convert foreign currency or accept negative amounts."
     ),
     json_response=True,
     transport_security=TransportSecuritySettings(
@@ -623,6 +1144,73 @@ async def get_charging_cost_history(
     """List audited cost changes for correction or verification."""
     _actor()
     return await asyncio.to_thread(_history, session_id=session_id, limit=limit)
+
+
+@mcp.tool()
+async def find_toll_journey_candidates(
+    from_time: str,
+    to_time: str,
+    entry_hint: str | None = None,
+    exit_hint: str | None = None,
+    amount_cny: str | None = None,
+    provider: Literal["manual", "etc", "wechat", "alipay", "other"] | None = None,
+    external_ref: str | None = None,
+    limit: int = 3,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Find one-to-many TeslaMate drive sequences for a highway toll without writing."""
+    return await asyncio.to_thread(
+        _find_toll_journey_candidates,
+        from_time=from_time,
+        to_time=to_time,
+        entry_hint=entry_hint,
+        exit_hint=exit_hint,
+        amount_cny=amount_cny,
+        provider=provider,
+        external_ref=external_ref,
+        limit=limit,
+    )
+
+
+@mcp.tool()
+async def request_toll_expense_changes(
+    changes: list[TollExpenseChange],
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Create, correct, link or void 1-20 toll expenses after one host approval card."""
+    actor = _actor()
+    return await asyncio.to_thread(
+        _request_toll_changes,
+        actor=actor,
+        changes=changes,
+    )
+
+
+@mcp.tool()
+async def get_toll_expense_history(
+    expense_id: str | None = None,
+    status: Literal["matched", "pending_match", "void"] | None = None,
+    limit: int = 20,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """List current toll expenses and their append-only change audit."""
+    _actor()
+    return await asyncio.to_thread(
+        _toll_history,
+        expense_id=expense_id,
+        status=status,
+        limit=limit,
+    )
+
+
+@mcp.tool()
+async def get_road_trip_cost_summary(
+    journey_id: str,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Return a matched road journey's toll, charging and known total costs."""
+    _actor()
+    return await asyncio.to_thread(_road_trip_cost_summary, journey_id)
 
 
 class ActorBearerAuthMiddleware(BaseHTTPMiddleware):

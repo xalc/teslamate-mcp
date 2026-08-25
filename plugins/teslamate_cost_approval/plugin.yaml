@@ -1,7 +1,7 @@
 name: teslamate_cost_approval
-version: 1.1.0
-description: Require one-time human approval before TeslaMate cost writes.
+version: 2.2.0
+description: Require fresh two-button approval before TeslaMate expense writes.
 author: Local
 provides_hooks:
+  - pre_gateway_dispatch
   - pre_tool_call
-

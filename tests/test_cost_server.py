@@ -323,3 +323,234 @@ def test_missing_pending_proposal_requires_prepare_again():
             "c6ed6005-c322-44aa-9156-cba0aed90f67",
             "huunter",
         )
+
+
+def test_find_toll_candidates_groups_continuous_drives(monkeypatch):
+    rows = [
+        {
+            "id": 1855,
+            "car_id": 1,
+            "start_date": datetime(2026, 8, 25, 5, 22),
+            "end_date": datetime(2026, 8, 25, 6, 29),
+            "distance": Decimal("78.6"),
+            "start_address": "宝鸡",
+            "end_address": "陈仓区",
+            "start_latitude": Decimal("34.37"),
+            "start_longitude": Decimal("107.13"),
+            "end_latitude": Decimal("34.35"),
+            "end_longitude": Decimal("107.38"),
+        },
+        {
+            "id": 1857,
+            "car_id": 1,
+            "start_date": datetime(2026, 8, 25, 6, 37),
+            "end_date": datetime(2026, 8, 25, 8, 10),
+            "distance": Decimal("163.2"),
+            "start_address": "陈仓区",
+            "end_address": "西安雁塔区",
+            "start_latitude": Decimal("34.35"),
+            "start_longitude": Decimal("107.38"),
+            "end_latitude": Decimal("34.22"),
+            "end_longitude": Decimal("108.95"),
+        },
+    ]
+    monkeypatch.setattr(cost_server, "_query", lambda sql, params=(): rows)
+    actor_token = cost_server.CURRENT_ACTOR.set("huunter")
+    try:
+        result = cost_server._find_toll_journey_candidates(
+            from_time="2026-08-25T13:22:00+08:00",
+            to_time="2026-08-25T16:10:00+08:00",
+            entry_hint="宝鸡",
+            exit_hint="西安",
+            amount_cny=None,
+            provider=None,
+            external_ref=None,
+            limit=3,
+        )
+    finally:
+        cost_server.CURRENT_ACTOR.reset(actor_token)
+
+    assert result["candidates"][0]["drive_ids"] == [1855, 1857]
+    assert result["candidates"][0]["distance_km"] == "241.8"
+    assert result["high_confidence"] is True
+    assert result["write_performed"] is False
+
+
+def test_find_toll_candidates_warns_about_possible_duplicate(monkeypatch):
+    def fake_query(sql, params=()):
+        if "toll_expense_current" in sql:
+            return [
+                {
+                    "expense_id": "b573f18e-f07c-4a1a-a67a-149130a01e22",
+                    "amount": Decimal("89.20"),
+                    "occurred_at": datetime(2026, 8, 25, 7, 0),
+                    "entry_name": "宝鸡",
+                    "exit_name": "西安",
+                    "provider": "etc",
+                    "external_ref": "ETC-1",
+                    "status": "matched",
+                    "journey_id": "c573f18e-f07c-4a1a-a67a-149130a01e22",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(cost_server, "_query", fake_query)
+    actor_token = cost_server.CURRENT_ACTOR.set("huunter")
+    try:
+        result = cost_server._find_toll_journey_candidates(
+            from_time="2026-08-25T00:00:00+08:00",
+            to_time="2026-08-26T00:00:00+08:00",
+            entry_hint="宝鸡",
+            exit_hint="西安",
+            amount_cny="89.20",
+            provider="etc",
+            external_ref="ETC-1",
+            limit=3,
+        )
+    finally:
+        cost_server.CURRENT_ACTOR.reset(actor_token)
+
+    assert result["duplicate_warning"] is True
+    assert result["duplicate_candidates"][0]["external_ref"] == "ETC-1"
+
+
+def test_find_toll_candidates_clamps_limit_and_types_optional_duplicate_filters(
+    monkeypatch,
+):
+    queries = []
+
+    def fake_query(sql, params=()):
+        queries.append((sql, params))
+        return []
+
+    monkeypatch.setattr(cost_server, "_query", fake_query)
+    actor_token = cost_server.CURRENT_ACTOR.set("huunter")
+    try:
+        result = cost_server._find_toll_journey_candidates(
+            from_time="2026-08-25T00:00:00+08:00",
+            to_time="2026-08-26T00:00:00+08:00",
+            entry_hint=None,
+            exit_hint=None,
+            amount_cny="41.75",
+            provider=None,
+            external_ref=None,
+            limit=5,
+        )
+    finally:
+        cost_server.CURRENT_ACTOR.reset(actor_token)
+
+    assert result["count"] == 0
+    duplicate_sql, duplicate_params = queries[-1]
+    assert "CAST(%s AS text) IS NULL" in duplicate_sql
+    assert "CAST(%s AS text) = ''" in duplicate_sql
+    assert duplicate_params[3:] == (None, None, "", "")
+
+
+def test_toll_request_allows_unmatched_and_passes_audited_function(monkeypatch):
+    captured = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, sql, params=()):
+            captured.append(params)
+
+        def fetchone(self):
+            params = captured[-1]
+            return {
+                "expense_id": params[3],
+                "revision": 1,
+                "status": "pending_match",
+                "journey_id": None,
+                "amount": params[5],
+                "occurred_at": params[6],
+                "idempotent": False,
+            }
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def cursor(self):
+            return FakeCursor()
+
+    monkeypatch.setattr(cost_server, "_connect", FakeConnection)
+    result = cost_server._request_toll_changes(
+        actor="huunter",
+        changes=[
+            {
+                "amount_cny": "89.20",
+                "occurred_at": "2026-08-25T15:00:00+08:00",
+                "entry_name": "宝鸡",
+                "exit_name": "西安",
+                "provider": "etc",
+                "source_kind": "screenshot",
+                "source_summary": "ETC paid 89.20",
+                "drive_ids": [],
+            }
+        ],
+    )
+
+    params = captured[0]
+    assert params[1] == "huunter"
+    assert params[2] == "upsert"
+    assert params[5] == Decimal("89.20")
+    assert params[14] is None
+    assert params[15] == []
+    assert len(params[11]) == 64
+    assert result["saved"][0]["status"] == "pending_match"
+
+
+def test_toll_request_rejects_duplicate_drive_ids_before_database(monkeypatch):
+    monkeypatch.setattr(
+        cost_server,
+        "_connect",
+        lambda: pytest.fail("database must not open for invalid drive ids"),
+    )
+    with pytest.raises(TeslaMateCostError, match="duplicates"):
+        cost_server._request_toll_changes(
+            actor="huunter",
+            changes=[
+                {
+                    "amount_cny": "10",
+                    "occurred_at": "2026-08-25T15:00:00+08:00",
+                    "drive_ids": [1855, 1855],
+                }
+            ],
+        )
+
+
+def test_road_trip_summary_marks_missing_charging_costs(monkeypatch):
+    def fake_one(sql, params=()):
+        if "road_journey_summary" in sql:
+            return {
+                "journey_id": params[0],
+                "car_id": 1,
+                "start_date": datetime(2026, 8, 25, 5, 22),
+                "end_date": datetime(2026, 8, 25, 8, 10),
+                "toll_total": Decimal("89.20"),
+                "drive_count": 2,
+            }
+        return {
+            "session_count": 2,
+            "missing_cost_count": 1,
+            "charging_total": Decimal("38.60"),
+        }
+
+    monkeypatch.setattr(cost_server, "_one", fake_one)
+    result = cost_server._road_trip_cost_summary(
+        "b573f18e-f07c-4a1a-a67a-149130a01e22"
+    )
+
+    assert result["toll_total_cny"] == "89.20"
+    assert result["charging_total_cny"] == "38.60"
+    assert result["known_total_cny"] == "127.80"
+    assert result["missing_charging_cost_count"] == 1
+    assert result["complete"] is False

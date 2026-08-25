@@ -5,7 +5,7 @@
 这是一个面向现有 TeslaMate 实例的 MCP 服务，包含两个相互隔离的入口：
 
 - 只读服务：查询车辆状态、行程、轨迹、充电、电池趋势和累计统计；
-- 充电费用服务：匹配充电记录，经一次人工审批后写入一笔或多笔费用，并保存审计记录。
+- 费用服务：匹配充电记录或高速旅程，经一次人工审批后写入充电费/高速费，并保存审计记录。
 
 服务直接读取 TeslaMate 的 PostgreSQL/MQTT 数据，不调用 Tesla API。
 
@@ -22,13 +22,18 @@
 - 电池与续航趋势；
 - 车辆累计统计。
 
-费用 MCP 仅公开三个工具：
+费用 MCP 公开已有三个充电费工具和四个高速费工具：
 
 1. `find_charging_sessions_for_cost`：根据日期、地点、充电量等信息查找候选充电记录，不写数据库；
 2. `request_charging_cost_changes`：弹出一次宿主审批，并以一个事务写入 1–20 条费用；
 3. `get_charging_cost_history`：查询费用修改审计记录。
 
-费用写入不需要用户先在聊天中发送“确认”。Hermes 在 MCP 工具真正执行前拦截请求，直接显示只有 **Allow Once** 和 **Deny** 的审批卡。批量操作中任何一条无效或已变化，整批都会回滚。
+4. `find_toll_journey_candidates`：把连续的 1–20 段 drive 自动组合成高速旅程候选；
+5. `request_toll_expense_changes`：原子创建、更正、补关联或作废高速费；
+6. `get_toll_expense_history`：查询高速费当前状态和完整审计；
+7. `get_road_trip_cost_summary`：汇总一趟旅程的高速费、已记录充电费和已知总成本。
+
+费用写入不需要用户先在聊天中发送“确认”。Hermes 在 MCP 工具真正执行前拦截请求，直接显示只有 **Approve** 和 **Reject** 的审批卡。批量操作中任何一条无效或已变化，整批都会回滚。高速费可以关联多段 drive；无法明确匹配时保存为 `pending_match`，之后再补关联。截图原图不保存。
 
 ## 架构与端口
 
@@ -47,7 +52,7 @@
 - 可访问 TeslaMate PostgreSQL 数据库；
 - 如需实时车辆状态，可访问 TeslaMate MQTT；
 - Docker Compose；或 Python 3.12+ 与 `uv`；
-- 如需审批卡，需使用支持 `pre_tool_call` 和 `once_only` 的 Hermes。
+- 如需审批卡，需使用支持 `pre_tool_call` 审批升级和飞书互动卡片的 Hermes。
 
 ## 配置密钥
 
@@ -128,7 +133,7 @@ docker compose logs --tail=200
 4. 为费用 MCP 配置与 actor 对应的 bearer token；
 5. 重启 Hermes，并确认插件加载成功；
 6. 先调用费用匹配工具，再用一条测试费用触发审批卡；
-7. 确认审批卡只有 **Allow Once** 和 **Deny**，批准后检查数据库费用和审计记录。
+7. 确认审批卡只有 **Approve** 和 **Reject**，批准后检查数据库费用和审计记录。
 
 插件会校验审批卡对应的批次，并在请求畸形、拒绝或超时时拒绝写入。
 
@@ -156,6 +161,13 @@ docker compose logs --tail=200
 
 ```text
 查一下最近 20 条充电费用修改记录，包括修改人、原金额、新金额和时间。
+```
+
+录入高速费与查询旅程成本：
+
+```text
+这张 ETC 截图是今天宝鸡到西安的高速费 89.20 元，请匹配行程并发起审批。
+这趟宝鸡回西安，充电加高速总共花了多少？
 ```
 
 ## 本地开发与测试

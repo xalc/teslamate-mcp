@@ -5,7 +5,7 @@
 Two authenticated MCP services for an existing [TeslaMate](https://github.com/teslamate-org/teslamate) deployment:
 
 - a read-only vehicle, drive, route, charging, battery and lifetime-statistics service;
-- a narrowly scoped charging-cost writer with an audit trail and one-time human approval.
+- a narrowly scoped charging/toll expense writer with audit trails and one-time human approval.
 
 The services query TeslaMate's PostgreSQL/MQTT data. They do not call Tesla APIs.
 
@@ -19,15 +19,20 @@ The services query TeslaMate's PostgreSQL/MQTT data. They do not call Tesla APIs
 
 The database role has `default_transaction_read_only=on`, a five-second statement timeout and access only to curated views that exclude Tesla credentials, VIN and internal identifiers.
 
-## Charging-cost workflow
+## Expense workflow
 
-The public cost-writer surface intentionally has only three tools:
+The cost writer keeps the existing three charging tools and adds four toll tools:
 
 1. `find_charging_sessions_for_cost` finds safe candidates without writing.
 2. `request_charging_cost_changes` requests one host approval and then atomically writes 1–20 matched costs.
 3. `get_charging_cost_history` reads the audit trail.
 
-There is no typed “yes, confirm” step. A compatible Hermes host intercepts the write request before MCP execution and displays a card containing only **Allow Once** and **Deny**. The included plugin lives in [`plugins/teslamate_cost_approval`](plugins/teslamate_cost_approval).
+4. `find_toll_journey_candidates` groups 1–20 continuous drives into toll journey candidates.
+5. `request_toll_expense_changes` creates, corrects, links or voids 1–20 toll expenses atomically.
+6. `get_toll_expense_history` returns current toll expenses and their append-only audit.
+7. `get_road_trip_cost_summary` combines a journey's known toll and charging costs.
+
+There is no typed “yes, confirm” step. A compatible Hermes host intercepts either write request before MCP execution and displays a card containing only **Approve** and **Reject**. The included plugin lives in [`plugins/teslamate_cost_approval`](plugins/teslamate_cost_approval). Toll receipts may link to multiple drives or remain `pending_match`; originals are never stored.
 
 Batch writes use one PostgreSQL transaction. If any row is stale or invalid, the entire batch rolls back. The writer role has no direct table-write grant; it can only call the audited `SECURITY DEFINER` function.
 
@@ -70,7 +75,7 @@ Default container ports are `8766` for the read-only service and `8767` for the 
 
 Copy `plugins/teslamate_cost_approval` into the active Hermes profile's `plugins/` directory, enable `teslamate_cost_approval` in that profile, and configure the cost-writer MCP URL and actor-specific bearer token.
 
-The plugin requires Hermes' `pre_tool_call` approval escalation with `once_only` support. It validates the batch shown on the card and fails closed on malformed requests, denial or timeout.
+The plugin uses Hermes `pre_tool_call` escalation plus a per-call rule key, installs the two-button Feishu card on gateway dispatch, and fails closed on malformed requests, denial or timeout.
 
 ## Development
 

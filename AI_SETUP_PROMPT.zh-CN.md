@@ -17,9 +17,9 @@ Hermes 目录/Profile：[HERMES_PROFILE_PATH 或 暂不接入]
 
 目标：
 1. 部署只读 TeslaMate MCP；
-2. 部署带审计的充电费用 MCP；
+2. 部署带审计的充电费用与高速费用 MCP；
 3. 如提供 Hermes Profile，安装审批插件并配置 MCP；
-4. 费用写入必须直接触发一次性审批卡，卡片只允许 Allow Once 或 Deny；
+4. 费用写入必须直接触发一次性审批卡，卡片只允许 Approve 或 Reject；
 5. 支持一次审批原子写入 1–20 条费用；
 6. 完成真实健康检查和最小烟雾测试。
 
@@ -68,7 +68,7 @@ E. 启动与验证
 - 执行 docker compose up -d --build。
 - 检查 docker compose ps、两个 /healthz、容器最新日志。
 - 枚举 MCP tools，确认只读工具存在。
-- 确认费用服务公开且只公开：find_charging_sessions_for_cost、request_charging_cost_changes、get_charging_cost_history。
+- 确认费用服务公开 7 个工具：3 个充电费工具，以及 find_toll_journey_candidates、request_toll_expense_changes、get_toll_expense_history、get_road_trip_cost_summary。
 
 F. Hermes 接入（如果提供了 Profile）
 - 将 plugins/teslamate_cost_approval 安装到准确的 Profile 并启用。
@@ -76,7 +76,7 @@ F. Hermes 接入（如果提供了 Profile）
 - 重启对应 Hermes 服务并检查加载日志。
 - 先执行不写入的费用匹配。
 - 发起一条明确标记的测试写入请求，确认无需聊天中的手动“确认”即可直接弹出审批卡。
-- 不要替我点击批准。请停在审批卡，让我选择 Allow Once 或 Deny；如果我批准，再验证费用值和审计历史。
+- 不要替我点击批准。请停在审批卡，让我选择 Approve 或 Reject；如果我批准，再验证费用值和审计历史。
 - 再验证两条费用可由一次审批原子写入；如缺少安全测试数据，说明验证方法，不制造真实账单。
 
 G. 交付报告
@@ -111,7 +111,7 @@ G. 交付报告
 3. 启用 teslamate_cost_approval 插件；
 4. 重启准确的服务并检查插件/MCP 加载日志；
 5. 验证只读查询；
-6. 发起费用请求时不要先让我在聊天中手动确认，应直接弹 Allow Once/Deny；
+6. 发起费用请求时不要先让我在聊天中手动确认，应直接弹 Approve/Reject；
 7. 不要代替我批准写入；
 8. 最终报告改动文件、服务状态和验证证据，所有 Token 必须打码。
 ```
