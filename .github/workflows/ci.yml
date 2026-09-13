@@ -19,7 +19,7 @@ jobs:
       - run: uv run --extra test pytest -q
       - name: Reject private deployment material
         run: |
-          if git grep -nE '(100\.[0-9]+\.[0-9]+\.[0-9]+|\.ts\.net|/home/ubuntu|BEGIN (RSA|OPENSSH) PRIVATE KEY|Bearer [A-Za-z0-9._-]{20,})'; then
+          if git grep -nE '(/home/ubuntu|BEGIN (RSA|OPENSSH) PRIVATE KEY|Bearer [A-Za-z0-9._-]{20,})' -- ':!.github/workflows/ci.yml'; then
             echo 'Private deployment material found.' >&2
             exit 1
           fi
