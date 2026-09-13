@@ -28,6 +28,37 @@ def test_parse_amount_rejects_unsafe_values(raw):
         cost_server._parse_amount(raw)
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("0", Decimal("0")),
+        ("44.123", Decimal("44.123")),
+        ("72.123456", Decimal("72.123456")),
+    ],
+)
+def test_parse_energy_accepts_meter_precision(raw, expected):
+    assert cost_server._parse_energy_kwh(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["-0.1", "1000.1", "1.1234567", "nan", "44 kWh"])
+def test_parse_energy_rejects_unsafe_values_with_correct_field_name(raw):
+    with pytest.raises(TeslaMateCostError, match="energy_kwh"):
+        cost_server._parse_energy_kwh(raw)
+
+
+def test_validation_error_response_is_not_a_transport_error():
+    result = cost_server._validation_error_response(
+        TeslaMateCostError("energy_kwh must be a decimal number")
+    )
+
+    assert result == {
+        "ok": False,
+        "validation_error": "energy_kwh must be a decimal number",
+        "retryable": True,
+        "write_performed": False,
+    }
+
+
 def test_proposal_token_is_actor_bound_and_expires():
     payload = {"actor": "huunter", "expires_at": 200, "session_id": 7}
     token = cost_server._sign_payload(payload)
@@ -108,6 +139,36 @@ def test_find_candidates_ranks_location_and_energy(monkeypatch):
 
     assert [item["id"] for item in result["candidates"]] == [2, 1]
     assert result["write_performed"] is False
+
+
+def test_find_candidates_clamps_limit_and_accepts_precise_energy(monkeypatch):
+    rows = [
+        {
+            "id": index,
+            "start_date": datetime(2026, 8, 9, index, 0),
+            "address": "Test Station",
+            "charge_energy_used": Decimal("44.123"),
+            "charge_energy_added": Decimal("44.100"),
+            "cost": None,
+        }
+        for index in range(1, 6)
+    ]
+    monkeypatch.setattr(cost_server, "_query", lambda sql, params=(): rows)
+    actor_token = cost_server.CURRENT_ACTOR.set("huunter")
+    try:
+        result = cost_server._find_charging_sessions(
+            from_time="2026-08-09T00:00:00+08:00",
+            to_time="2026-08-10T00:00:00+08:00",
+            location_hint=None,
+            energy_kwh="44.123",
+            unpriced_only=True,
+            limit=5,
+        )
+    finally:
+        cost_server.CURRENT_ACTOR.reset(actor_token)
+
+    assert result["count"] == 3
+    assert len(result["candidates"]) == 3
 
 
 def test_commit_uses_signed_payload_and_returns_audit(monkeypatch):

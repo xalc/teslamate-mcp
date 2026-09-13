@@ -201,6 +201,33 @@ def _parse_amount(value: str) -> Decimal:
     return normalized
 
 
+def _parse_energy_kwh(value: str) -> Decimal:
+    raw = str(value).strip()
+    if not raw or len(raw) > 32:
+        raise TeslaMateCostError("energy_kwh must be a decimal number")
+    try:
+        energy = Decimal(raw)
+    except (InvalidOperation, ValueError) as exc:
+        raise TeslaMateCostError("energy_kwh must be a decimal number") from exc
+    if not energy.is_finite():
+        raise TeslaMateCostError("energy_kwh must be finite")
+    if energy < 0 or energy > Decimal("1000"):
+        raise TeslaMateCostError("energy_kwh must be between 0 and 1000")
+    if energy.as_tuple().exponent < -6:
+        raise TeslaMateCostError("energy_kwh must have at most six decimal places")
+    return energy
+
+
+def _validation_error_response(exc: TeslaMateCostError) -> dict[str, Any]:
+    """Return argument validation without marking the MCP transport failed."""
+    return {
+        "ok": False,
+        "validation_error": str(exc),
+        "retryable": True,
+        "write_performed": False,
+    }
+
+
 def _sanitize_summary(value: str) -> str:
     cleaned = re.sub(r"[\x00-\x1f\x7f]+", " ", str(value or ""))
     return re.sub(r"\s+", " ", cleaned).strip()[:500]
@@ -317,9 +344,10 @@ def _find_charging_sessions(
     end = _parse_time(to_time)
     if start >= end:
         raise TeslaMateCostError("from_time must be earlier than to_time")
-    if limit < 1 or limit > 3:
-        raise TeslaMateCostError("limit must be between 1 and 3")
-    requested_energy = _parse_amount(energy_kwh) if energy_kwh is not None else None
+    limit = max(1, min(limit, 3))
+    requested_energy = (
+        _parse_energy_kwh(energy_kwh) if energy_kwh is not None else None
+    )
     rows = _query(
         """
         SELECT * FROM teslamate_cost_mcp.charging_sessions
@@ -1110,15 +1138,18 @@ async def find_charging_sessions_for_cost(
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Find candidate sessions without writing. Resolve fuzzy dates to Asia/Shanghai before calling."""
-    return await asyncio.to_thread(
-        _find_charging_sessions,
-        from_time=from_time,
-        to_time=to_time,
-        location_hint=location_hint,
-        energy_kwh=energy_kwh,
-        unpriced_only=unpriced_only,
-        limit=limit,
-    )
+    try:
+        return await asyncio.to_thread(
+            _find_charging_sessions,
+            from_time=from_time,
+            to_time=to_time,
+            location_hint=location_hint,
+            energy_kwh=energy_kwh,
+            unpriced_only=unpriced_only,
+            limit=limit,
+        )
+    except TeslaMateCostError as exc:
+        return _validation_error_response(exc)
 
 
 @mcp.tool()
@@ -1143,7 +1174,10 @@ async def get_charging_cost_history(
 ) -> dict[str, Any]:
     """List audited cost changes for correction or verification."""
     _actor()
-    return await asyncio.to_thread(_history, session_id=session_id, limit=limit)
+    try:
+        return await asyncio.to_thread(_history, session_id=session_id, limit=limit)
+    except TeslaMateCostError as exc:
+        return _validation_error_response(exc)
 
 
 @mcp.tool()
@@ -1159,17 +1193,20 @@ async def find_toll_journey_candidates(
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Find one-to-many TeslaMate drive sequences for a highway toll without writing."""
-    return await asyncio.to_thread(
-        _find_toll_journey_candidates,
-        from_time=from_time,
-        to_time=to_time,
-        entry_hint=entry_hint,
-        exit_hint=exit_hint,
-        amount_cny=amount_cny,
-        provider=provider,
-        external_ref=external_ref,
-        limit=limit,
-    )
+    try:
+        return await asyncio.to_thread(
+            _find_toll_journey_candidates,
+            from_time=from_time,
+            to_time=to_time,
+            entry_hint=entry_hint,
+            exit_hint=exit_hint,
+            amount_cny=amount_cny,
+            provider=provider,
+            external_ref=external_ref,
+            limit=limit,
+        )
+    except TeslaMateCostError as exc:
+        return _validation_error_response(exc)
 
 
 @mcp.tool()
@@ -1195,12 +1232,15 @@ async def get_toll_expense_history(
 ) -> dict[str, Any]:
     """List current toll expenses and their append-only change audit."""
     _actor()
-    return await asyncio.to_thread(
-        _toll_history,
-        expense_id=expense_id,
-        status=status,
-        limit=limit,
-    )
+    try:
+        return await asyncio.to_thread(
+            _toll_history,
+            expense_id=expense_id,
+            status=status,
+            limit=limit,
+        )
+    except TeslaMateCostError as exc:
+        return _validation_error_response(exc)
 
 
 @mcp.tool()
@@ -1210,7 +1250,10 @@ async def get_road_trip_cost_summary(
 ) -> dict[str, Any]:
     """Return a matched road journey's toll, charging and known total costs."""
     _actor()
-    return await asyncio.to_thread(_road_trip_cost_summary, journey_id)
+    try:
+        return await asyncio.to_thread(_road_trip_cost_summary, journey_id)
+    except TeslaMateCostError as exc:
+        return _validation_error_response(exc)
 
 
 class ActorBearerAuthMiddleware(BaseHTTPMiddleware):
