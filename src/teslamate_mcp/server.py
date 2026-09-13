@@ -24,6 +24,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from teslamate_mcp.privacy import LocationPrivacy
+
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("teslamate_mcp")
@@ -53,10 +55,11 @@ ALLOWED_HOSTS = [
     item.strip()
     for item in os.environ.get(
         "TESLAMATE_MCP_ALLOWED_HOSTS",
-        "127.0.0.1:*,localhost:*,100.84.50.63:*,main-oci.tail7affc2.ts.net:*",
+        "127.0.0.1:*,localhost:*",
     ).split(",")
     if item.strip()
 ]
+LOCATION_PRIVACY = LocationPrivacy.from_env()
 
 
 class TeslaMateMCPError(RuntimeError):
@@ -238,7 +241,7 @@ def audited(fn: Callable[..., Any]) -> Callable[..., Any]:
         try:
             result = fn(*args, **kwargs)
             record["status"] = "ok"
-            return result
+            return LOCATION_PRIVACY.apply(result)
         except Exception:
             record["status"] = "error"
             raise
@@ -469,7 +472,7 @@ def get_drive(drive_id: int) -> dict[str, Any]:
 @mcp.tool()
 @audited
 def get_drive_route(drive_id: int, max_points: int = 300) -> dict[str, Any]:
-    """Return an exact-coordinate route downsampled to at most 500 points."""
+    """Return a route using the server-configured location privacy mode."""
     count = _one("SELECT count(*) AS count FROM teslamate_mcp.positions WHERE drive_id = %s", (drive_id,))
     total = int(count["count"] if count else 0)
     if total == 0:

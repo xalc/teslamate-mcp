@@ -166,8 +166,8 @@ def test_toll_request_requires_fresh_two_button_approval():
                 {
                     "amount_cny": "89.2",
                     "occurred_at": "2026-08-25T15:00:00+08:00",
-                    "entry_name": "宝鸡",
-                    "exit_name": "西安",
+                    "entry_name": "Example East",
+                    "exit_name": "Example West",
                     "drive_ids": [1855, 1857],
                     "source_kind": "screenshot",
                 }
@@ -184,8 +184,8 @@ def test_toll_request_requires_fresh_two_button_approval():
                 {
                     "amount_cny": "89.2",
                     "occurred_at": "2026-08-25T15:00:00+08:00",
-                    "entry_name": "宝鸡",
-                    "exit_name": "西安",
+                    "entry_name": "Example East",
+                    "exit_name": "Example West",
                     "drive_ids": [1855, 1857],
                 }
             ]
@@ -196,7 +196,7 @@ def test_toll_request_requires_fresh_two_button_approval():
     )
 
     assert first["action"] == "approve"
-    assert "宝鸡 → 西安：¥89.20（关联 2 段行程）" in first["message"]
+    assert "Example East → Example West：¥89.20（关联 2 段行程）" in first["message"]
     assert first["rule_key"] != second["rule_key"]
     assert "once_only" not in first
 

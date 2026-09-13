@@ -79,7 +79,7 @@ openssl rand -hex 32
 
 ## 修改部署配置
 
-打开 `compose.yaml`，按实际环境调整：
+复制 `.env.example` 为 `.env`，按实际环境调整：
 
 - PostgreSQL 主机、端口、数据库名和用户名；
 - MQTT 主机及认证信息；
@@ -88,7 +88,21 @@ openssl rand -hex 32
 - MCP 的 allowed hosts；
 - 费用服务的 actor 与各自 bearer token。
 
-仓库中的 Compose 配置是一个部署模板，其中可能带有原部署环境的网络名称或 actor 名称。新环境必须先检查并替换，不能直接假设可用。
+Compose 默认只绑定 `127.0.0.1`，不包含原部署环境的 IP、域名或网络名称。
+
+## 位置隐私
+
+只读与费用 MCP 在结果返回给 AI 前应用同一套服务端策略：
+
+- `TESLAMATE_LOCATION_PRIVACY=coarse`：默认。坐标保留两位小数；完整地址只保留城市；无法安全判断的独立地点名默认隐藏。
+- `hidden`：保留响应字段，但地址、地点和经纬度的值为 `null`。
+- `precise`：返回原始地址、坐标和轨迹，只能通过服务端环境变量显式开启。
+
+MCP 调用参数不能临时提升位置精度。每个响应都包含 `location_privacy` 元数据。若希望在模糊模式中显示“家附近”“充电区域”等安全别名，把 `config/location-aliases.example.json` 复制为已忽略的 `config/location-aliases.json`，然后设置：
+
+```text
+TESLAMATE_LOCATION_ALIASES_FILE=/config/location-aliases.json
+```
 
 ## 初始化数据库
 
@@ -166,8 +180,8 @@ docker compose logs --tail=200
 录入高速费与查询旅程成本：
 
 ```text
-这张 ETC 截图是今天宝鸡到西安的高速费 89.20 元，请匹配行程并发起审批。
-这趟宝鸡回西安，充电加高速总共花了多少？
+这张 ETC 截图是今天示例东站到示例西站的高速费 89.20 元，请匹配行程并发起审批。
+这趟示例东站到示例西站，充电加高速总共花了多少？
 ```
 
 ## 本地开发与测试
@@ -189,7 +203,7 @@ git grep -nE '(BEGIN (RSA|OPENSSH) PRIVATE KEY|Bearer [A-Za-z0-9._-]{20,})'
 - 只读数据库角色启用只读事务、查询超时，并仅访问经过筛选的视图；
 - 费用角色不能直接修改 TeslaMate 表，只能调用带审计的受控数据库函数；
 - 每次写入都需要一次宿主审批，不提供永久允许选项；
-- 路线和充电记录可能包含精确坐标，MCP 地址和 Token 应视为敏感信息；
+- `precise` 模式会暴露精确路线和常驻地点，只能在可信私有环境中启用；
 - 原始账单截图不落库，只把必要的来源摘要写入审计记录。
 
 需要让 AI 协助安装时，请把 [AI_SETUP_PROMPT.zh-CN.md](AI_SETUP_PROMPT.zh-CN.md) 的内容和本仓库地址一起交给它。

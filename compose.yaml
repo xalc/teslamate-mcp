@@ -1,7 +1,7 @@
 services:
   teslamate_mcp:
     build: .
-    image: local/teslamate-mcp:0.4.1
+    image: local/teslamate-mcp:0.5.0
     container_name: teslamate_mcp
     restart: unless-stopped
     environment:
@@ -13,13 +13,18 @@ services:
       TESLAMATE_MQTT_HOST: mosquitto
       TESLAMATE_MQTT_PORT: "1883"
       TESLAMATE_WEB_URL: http://teslamate:4000/
-      TESLAMATE_TIMEZONE: Asia/Shanghai
+      TESLAMATE_TIMEZONE: ${TESLAMATE_TIMEZONE:-UTC}
+      TESLAMATE_LOCATION_PRIVACY: ${TESLAMATE_LOCATION_PRIVACY:-coarse}
+      TESLAMATE_LOCATION_COORD_DECIMALS: ${TESLAMATE_LOCATION_COORD_DECIMALS:-2}
+      TESLAMATE_LOCATION_ALIASES_FILE: ${TESLAMATE_LOCATION_ALIASES_FILE:-}
       TESLAMATE_MCP_HOST: 0.0.0.0
       TESLAMATE_MCP_PORT: "8766"
       TESLAMATE_MCP_TOKEN_FILE: /run/secrets/mcp_token
-      TESLAMATE_MCP_ALLOWED_HOSTS: 127.0.0.1:*,localhost:*,100.84.50.63:*,main-oci.tail7affc2.ts.net:*
+      TESLAMATE_MCP_ALLOWED_HOSTS: ${TESLAMATE_MCP_ALLOWED_HOSTS:-127.0.0.1:*,localhost:*}
     ports:
-      - "100.84.50.63:8766:8766"
+      - "${TESLAMATE_BIND_ADDRESS:-127.0.0.1}:${TESLAMATE_MCP_PORT:-8766}:8766"
+    volumes:
+      - ./config:/config:ro
     secrets:
       - db_password
       - mcp_token
@@ -41,7 +46,7 @@ services:
 
   teslamate_cost_mcp:
     build: .
-    image: local/teslamate-mcp:0.4.1
+    image: local/teslamate-mcp:0.5.0
     container_name: teslamate_cost_mcp
     entrypoint: ["teslamate-cost-mcp"]
     restart: unless-stopped
@@ -51,15 +56,20 @@ services:
       TESLAMATE_DB_NAME: teslamate
       TESLAMATE_DB_USER: teslamate_cost_mcp
       TESLAMATE_COST_DB_PASSWORD_FILE: /run/secrets/cost_db_password
-      TESLAMATE_TIMEZONE: Asia/Shanghai
+      TESLAMATE_TIMEZONE: ${TESLAMATE_TIMEZONE:-UTC}
+      TESLAMATE_LOCATION_PRIVACY: ${TESLAMATE_LOCATION_PRIVACY:-coarse}
+      TESLAMATE_LOCATION_COORD_DECIMALS: ${TESLAMATE_LOCATION_COORD_DECIMALS:-2}
+      TESLAMATE_LOCATION_ALIASES_FILE: ${TESLAMATE_LOCATION_ALIASES_FILE:-}
       TESLAMATE_COST_HOST: 0.0.0.0
       TESLAMATE_COST_PORT: "8767"
       TESLAMATE_COST_TOKEN_HUUNTER_FILE: /run/secrets/cost_token_huunter
       TESLAMATE_COST_TOKEN_GUOGUO_FILE: /run/secrets/cost_token_guoguo
       TESLAMATE_COST_SIGNING_SECRET_FILE: /run/secrets/cost_signing_secret
-      TESLAMATE_COST_ALLOWED_HOSTS: 127.0.0.1:*,localhost:*,100.84.50.63:*,main-oci.tail7affc2.ts.net:*
+      TESLAMATE_COST_ALLOWED_HOSTS: ${TESLAMATE_COST_ALLOWED_HOSTS:-127.0.0.1:*,localhost:*}
     ports:
-      - "100.84.50.63:8767:8767"
+      - "${TESLAMATE_BIND_ADDRESS:-127.0.0.1}:${TESLAMATE_COST_PORT:-8767}:8767"
+    volumes:
+      - ./config:/config:ro
     secrets:
       - cost_db_password
       - cost_token_huunter
@@ -98,4 +108,4 @@ secrets:
 networks:
   teslamate:
     external: true
-    name: oci-staging_default
+    name: ${TESLAMATE_DOCKER_NETWORK:-teslamate_default}

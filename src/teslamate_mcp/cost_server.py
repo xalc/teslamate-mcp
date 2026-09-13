@@ -29,6 +29,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from teslamate_mcp.privacy import LocationPrivacy
+
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("teslamate_cost_mcp")
 
@@ -100,10 +102,11 @@ ALLOWED_HOSTS = [
     item.strip()
     for item in os.environ.get(
         "TESLAMATE_COST_ALLOWED_HOSTS",
-        "127.0.0.1:*,localhost:*,100.84.50.63:*,main-oci.tail7affc2.ts.net:*",
+        "127.0.0.1:*,localhost:*",
     ).split(",")
     if item.strip()
 ]
+LOCATION_PRIVACY = LocationPrivacy.from_env()
 PENDING_PROPOSAL_LIMIT = 1024
 _PENDING_PROPOSALS: dict[str, dict[str, Any]] = {}
 _PENDING_PROPOSALS_LOCK = threading.Lock()
@@ -1139,7 +1142,7 @@ async def find_charging_sessions_for_cost(
 ) -> dict[str, Any]:
     """Find candidate sessions without writing. Resolve fuzzy dates to Asia/Shanghai before calling."""
     try:
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             _find_charging_sessions,
             from_time=from_time,
             to_time=to_time,
@@ -1148,8 +1151,9 @@ async def find_charging_sessions_for_cost(
             unpriced_only=unpriced_only,
             limit=limit,
         )
+        return LOCATION_PRIVACY.apply(result)
     except TeslaMateCostError as exc:
-        return _validation_error_response(exc)
+        return LOCATION_PRIVACY.apply(_validation_error_response(exc))
 
 
 @mcp.tool()
@@ -1159,11 +1163,12 @@ async def request_charging_cost_changes(
 ) -> dict[str, Any]:
     """Final action after exact matching: directly open one host approval card, then atomically write 1-20 changes. Never ask for typed confirmation first."""
     actor = _actor()
-    return await asyncio.to_thread(
+    result = await asyncio.to_thread(
         _request_changes,
         actor=actor,
         changes=changes,
     )
+    return LOCATION_PRIVACY.apply(result)
 
 
 @mcp.tool()
@@ -1175,9 +1180,10 @@ async def get_charging_cost_history(
     """List audited cost changes for correction or verification."""
     _actor()
     try:
-        return await asyncio.to_thread(_history, session_id=session_id, limit=limit)
+        result = await asyncio.to_thread(_history, session_id=session_id, limit=limit)
+        return LOCATION_PRIVACY.apply(result)
     except TeslaMateCostError as exc:
-        return _validation_error_response(exc)
+        return LOCATION_PRIVACY.apply(_validation_error_response(exc))
 
 
 @mcp.tool()
@@ -1194,7 +1200,7 @@ async def find_toll_journey_candidates(
 ) -> dict[str, Any]:
     """Find one-to-many TeslaMate drive sequences for a highway toll without writing."""
     try:
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             _find_toll_journey_candidates,
             from_time=from_time,
             to_time=to_time,
@@ -1205,8 +1211,9 @@ async def find_toll_journey_candidates(
             external_ref=external_ref,
             limit=limit,
         )
+        return LOCATION_PRIVACY.apply(result)
     except TeslaMateCostError as exc:
-        return _validation_error_response(exc)
+        return LOCATION_PRIVACY.apply(_validation_error_response(exc))
 
 
 @mcp.tool()
@@ -1216,11 +1223,12 @@ async def request_toll_expense_changes(
 ) -> dict[str, Any]:
     """Create, correct, link or void 1-20 toll expenses after one host approval card."""
     actor = _actor()
-    return await asyncio.to_thread(
+    result = await asyncio.to_thread(
         _request_toll_changes,
         actor=actor,
         changes=changes,
     )
+    return LOCATION_PRIVACY.apply(result)
 
 
 @mcp.tool()
@@ -1233,14 +1241,15 @@ async def get_toll_expense_history(
     """List current toll expenses and their append-only change audit."""
     _actor()
     try:
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             _toll_history,
             expense_id=expense_id,
             status=status,
             limit=limit,
         )
+        return LOCATION_PRIVACY.apply(result)
     except TeslaMateCostError as exc:
-        return _validation_error_response(exc)
+        return LOCATION_PRIVACY.apply(_validation_error_response(exc))
 
 
 @mcp.tool()
@@ -1251,9 +1260,10 @@ async def get_road_trip_cost_summary(
     """Return a matched road journey's toll, charging and known total costs."""
     _actor()
     try:
-        return await asyncio.to_thread(_road_trip_cost_summary, journey_id)
+        result = await asyncio.to_thread(_road_trip_cost_summary, journey_id)
+        return LOCATION_PRIVACY.apply(result)
     except TeslaMateCostError as exc:
-        return _validation_error_response(exc)
+        return LOCATION_PRIVACY.apply(_validation_error_response(exc))
 
 
 class ActorBearerAuthMiddleware(BaseHTTPMiddleware):

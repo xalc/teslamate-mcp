@@ -57,7 +57,7 @@ secrets/cost_signing_secret
 
 Generate bearer/signing values with a cryptographically secure generator, for example `openssl rand -hex 32`. The entire `secrets/` directory is gitignored and excluded from the Docker build context.
 
-Edit the host bindings, external TeslaMate network name and allowed hosts in `compose.yaml` for your deployment. Then apply the idempotent database setup scripts as the TeslaMate database owner:
+Copy [`.env.example`](.env.example) to `.env`, then set the host binding, external TeslaMate network name and allowed hosts for your deployment. The defaults bind both services to localhost. Apply the idempotent database setup scripts as the TeslaMate database owner:
 
 - [`db/setup.sql`](db/setup.sql) for read-only views and role;
 - [`db/setup_cost.sql`](db/setup_cost.sql) for the cost writer, audit table and function.
@@ -70,6 +70,16 @@ docker compose ps
 ```
 
 Default container ports are `8766` for the read-only service and `8767` for the cost writer. Both MCP endpoints use Streamable HTTP at `/mcp`; health checks are exposed at `/healthz`.
+
+## Location privacy
+
+Both services apply the same server-side location policy before returning data to an MCP client:
+
+- `TESLAMATE_LOCATION_PRIVACY=coarse` is the default. Coordinates are rounded to two decimal places, fallback addresses retain only their city component, and exact standalone place labels are hidden unless aliased.
+- `hidden` keeps response keys stable but returns `null` for coordinates and place fields.
+- `precise` returns the original addresses and coordinates and must be enabled explicitly in the server environment.
+
+The client cannot override this policy in a tool call. Every response includes `location_privacy` metadata. To expose useful labels without publishing private addresses, copy [`config/location-aliases.example.json`](config/location-aliases.example.json) to the gitignored `config/location-aliases.json` and set `TESLAMATE_LOCATION_ALIASES_FILE=/config/location-aliases.json`.
 
 ## Hermes approval plugin
 
@@ -95,5 +105,5 @@ git grep -nE '(BEGIN (RSA|OPENSSH) PRIVATE KEY|Bearer [A-Za-z0-9._-]{20,})'
 
 - Never commit `secrets/`, `.env`, database dumps, exports or rollback archives.
 - Bind the service ports to localhost, a private interface or a trusted overlay network.
-- Route and charging tools may return exact coordinates; treat access as sensitive.
+- `precise` mode exposes exact routes and recurring locations; enable it only on a trusted private deployment.
 - Original billing screenshots are not stored. Only the supplied source summary is written to the cost audit row.

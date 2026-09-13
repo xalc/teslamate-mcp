@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --extra test --locked
+      - run: uv run --extra test pytest -q
+      - name: Reject private deployment material
+        run: |
+          if git grep -nE '(100\.[0-9]+\.[0-9]+\.[0-9]+|\.ts\.net|/home/ubuntu|BEGIN (RSA|OPENSSH) PRIVATE KEY|Bearer [A-Za-z0-9._-]{20,})'; then
+            echo 'Private deployment material found.' >&2
+            exit 1
+          fi
+      - run: docker compose config -q

@@ -10,6 +10,7 @@
 TeslaMate 部署位置：[TESLAMATE_DIRECTORY 或 自动探测]
 TeslaMate Docker 网络：[TESLAMATE_DOCKER_NETWORK 或 自动探测]
 服务绑定地址：[BIND_ADDRESS，推荐 127.0.0.1 或 Tailscale IP]
+位置隐私模式：[LOCATION_PRIVACY，默认 coarse；可选 hidden/coarse/precise]
 只读 MCP 端口：[默认 8766]
 费用 MCP 端口：[默认 8767]
 Hermes 目录/Profile：[HERMES_PROFILE_PATH 或 暂不接入]
@@ -31,6 +32,7 @@ Hermes 目录/Profile：[HERMES_PROFILE_PATH 或 暂不接入]
 - 不把 secrets/、.env、数据库导出、截图、备份、日志中的凭据提交到 Git。
 - 使用安全随机值生成 Token 和签名密钥；文件权限限制为仅服务账号可读。
 - 不把 MCP 暴露在公网；只允许 localhost、可信内网或 Tailscale 地址。
+- 默认使用 `coarse` 位置隐私；只有用户明确要求并确认风险时才使用 `precise`。
 - 数据库变更前阅读 SQL，确认目标库，说明将创建的角色、视图、表和函数，并保留可恢复方案。
 - 保留现有用户改动；不得执行 git reset --hard、git clean -fd 或覆盖未知文件。
 - 所有配置改动先备份；只做完成目标所需的最小修改。

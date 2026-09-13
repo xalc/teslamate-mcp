@@ -119,7 +119,9 @@ SELECT cp.id,
            ),
            ''
          )
-       ) AS address
+       ) AS address,
+       g.name AS geofence,
+       a.city AS city
 FROM public.charging_processes cp
 LEFT JOIN public.addresses a ON a.id = cp.address_id
 LEFT JOIN public.geofences g ON g.id = cp.geofence_id;
@@ -158,7 +160,11 @@ SELECT d.id,
          eg.name,
          NULLIF(ea.name, ''),
          NULLIF(concat_ws(', ', NULLIF(concat_ws(' ', ea.road, ea.house_number), ''), ea.city), '')
-       ) AS end_address
+       ) AS end_address,
+       sg.name AS start_geofence,
+       sa.city AS start_city,
+       eg.name AS end_geofence,
+       ea.city AS end_city
 FROM public.drives d
 LEFT JOIN public.positions sp ON sp.id = d.start_position_id
 LEFT JOIN public.positions ep ON ep.id = d.end_position_id

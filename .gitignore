@@ -13,3 +13,5 @@ secrets/
 backups/
 exports/
 
+# Private location labels. Commit only the example file.
+config/location-aliases.json
