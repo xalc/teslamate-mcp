@@ -588,6 +588,28 @@ def test_toll_request_rejects_duplicate_drive_ids_before_database(monkeypatch):
         )
 
 
+@pytest.mark.parametrize("status", [None, "matched"])
+def test_toll_history_types_optional_status_filter(monkeypatch, status):
+    queries = []
+
+    def fake_query(sql, params=()):
+        queries.append((sql, params))
+        if "toll_expense_current" in sql:
+            return [{"status": "matched"}]
+        return []
+
+    monkeypatch.setattr(cost_server, "_query", fake_query)
+    result = cost_server._toll_history(expense_id=None, status=status, limit=20)
+
+    current_sql, current_params = queries[0]
+    assert "CAST(%s AS text) IS NULL" in current_sql
+    assert "status = CAST(%s AS text)" in current_sql
+    assert current_params == (None, None, status, status, 20)
+    assert result["count"] == 1
+    assert result["expenses"] == [{"status": "matched"}]
+    assert len(queries) == 2
+
+
 def test_road_trip_summary_marks_missing_charging_costs(monkeypatch):
     def fake_one(sql, params=()):
         if "road_journey_summary" in sql:

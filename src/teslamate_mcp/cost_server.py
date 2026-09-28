@@ -1031,7 +1031,7 @@ def _toll_history(
         """
         SELECT * FROM teslamate_cost_mcp.toll_expense_current
         WHERE (%s::uuid IS NULL OR expense_id = %s::uuid)
-          AND (%s IS NULL OR status = %s)
+          AND (CAST(%s AS text) IS NULL OR status = CAST(%s AS text))
         ORDER BY occurred_at DESC, expense_id DESC
         LIMIT %s
         """,
